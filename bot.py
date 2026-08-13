@@ -324,17 +324,18 @@ def do_place(client, token_cond, token_to_cond, live):
 
 
 # ── 买入规划 ────────────────────────────────────────────────────────
-def plan_buy(candidates, open_orders, bids):
+def plan_buy(candidates, open_orders, bids, positions):
     """对比本轮候选 vs 当前挂单。目标价 = CLOB bestBid（candidates 已筛>20天）。
-    每个 token 只保留一个价格正确的 BUY 单，其余撤掉。返回 (to_cancel, to_place)。"""
+    每个 token 只保留一个价格正确的 BUY 单，其余撤掉；有持仓的 token 不再挂买单。
+    返回 (to_cancel, to_place)。"""
     to_cancel, to_place = [], {}
     all_tokens = set(open_orders.keys()) | set(candidates.keys())
 
     for token_id in all_tokens:
         buy_orders = [o for o in open_orders.get(token_id, []) if o["side"] == "BUY"]
-        # 目标价：候选里 CLOB bestBid<0.05
+        # 目标价：候选里 CLOB bestBid<0.05，且无持仓（成交后停止买，只卖）
         target_price = None
-        if token_id in candidates:
+        if token_id in candidates and token_id not in positions:
             bb = _float(bids.get(token_id))
             if bb is not None and 0 < bb < PRICE_CEIL:
                 target_price = str(bb)
@@ -396,15 +397,15 @@ def one_round(client, live, max_orders=None):
     log.info("扫描候选 %d 个（%.1fs）", len(candidates), time.time() - t0)
     buy_state = load_buy_state()
     open_orders = list_open_orders(client)
+    positions = list_positions(client)   # 提前查持仓，plan_buy 需据此停止挂买单
     need_bids = set(candidates.keys()) | set(open_orders.keys())
     bids = fetch_prices(need_bids, "BUY")
-    buy_cancel, buy_place = plan_buy(candidates, open_orders, bids)
+    buy_cancel, buy_place = plan_buy(candidates, open_orders, bids, positions)
     if max_orders is not None:
         buy_place = dict(list(buy_place.items())[:max_orders])
     log.info("买入：待撤 %d，待挂 %d", len(buy_cancel), len(buy_place))
 
     # 卖出：持仓 → 对比 → 执行
-    positions = list_positions(client)
     pos_ids = list(positions.keys())
     asks = fetch_prices(pos_ids, "SELL") if pos_ids else {}
     sell_cancel, sell_place = plan_sell(positions, open_orders, asks)
