@@ -1,0 +1,4 @@
+polymarket-client
+python-dotenv
+websocket-client
+requests
