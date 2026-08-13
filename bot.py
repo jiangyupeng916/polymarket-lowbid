@@ -372,8 +372,8 @@ def plan_sell(positions, open_orders, asks):
         sz = _float(p["size"])
         if sz is None or sz <= 0:
             continue
-        # 卖出名义金额 < 1 USDC 跳过（低于最小卖单量，会被拒）
-        if sz * _float(ask) < 1.0:
+        # 卖出最小份额 > 5（低于 5 份会被拒，价格无限制）
+        if sz <= 5:
             continue
         sell_orders = [o for o in open_orders.get(token_id, []) if o["side"] == "SELL"]
         kept = False
