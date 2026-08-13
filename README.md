@@ -52,11 +52,6 @@
 
 ```
 ├── bot.py                  # ★ 主循环（买入 + 卖出 + CSV 状态 + 全局限流）
-├── execution.py            # 用户已有的下单/撤单参考实现（线程池 + 全局限流）
-├── place_test_orders.py    # 测试脚本：随机挑 N 个候选下单验证
-├── scan_candidates.py      # 旧版冷扫描（已被 bot.py 内置扫描取代，保留参考）
-├── poller.py               # 旧版热轮询（已被 bot.py 取代，保留参考）
-├── probes/                 # 诊断探针（取价语义、限流、预取验证等，只读）
 ├── data/
 │   └── buy_state.csv       # 运行时生成：买入状态（gitignored）
 ├── .env.bot1               # 凭据（gitignored，绝不提交）
@@ -175,7 +170,7 @@ python bot.py --live --once --max 20
 
 ## 关键实测经验
 
-> 这些是本项目开发中踩坑得出的结论（详见 `probes/` 探针）。
+> 这些是本项目开发中踩坑得出的结论。
 
 1. **bestBid 用 CLOB，不用 Gamma**：Gamma 的 `bestBid` 不准确（用户实测 + 本仓库验证），筛选/下单/清理一律用 CLOB `/prices` 实时价。
 2. **取价**：`GET /price?side=BUY` = bestBid，`side=SELL` = bestAsk；批量用 `POST /prices`（body 是纯数组 `[{token_id, side}]`）。
