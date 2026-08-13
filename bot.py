@@ -47,7 +47,8 @@ CLOB = "https://clob.polymarket.com"
 BUY_STATE = os.path.join("data", "buy_state.csv")
 
 SHARES = 10              # 每 token 挂 10 份（买入，用户实测可挂）
-PRICE_CEIL = 0.05        # bestBid < 0.05
+PRICE_CEIL = 0.05        # bestBid < 0.05（下单/清理阈值，用 CLOB /prices 实时价）
+SCAN_CEIL = 0.1          # Gamma 粗筛停止阈值（不信任 Gamma bestBid，放宽到 0.1 留余量）
 DAYS_AHEAD = 20          # 结算 > 20 天
 EXEC_INTERVAL = 0.05     # 两次写操作最小间隔（秒）→ 20 单/秒
 PLACE_WORKERS = 8        # 下单线程池大小（写操作被全局限流串行化）
@@ -115,7 +116,7 @@ def scan_candidates():
         done = False
         for m in d["markets"]:
             b = _float(m.get("bestBid"))
-            if b is not None and b >= PRICE_CEIL:
+            if b is not None and b >= SCAN_CEIL:
                 done = True
                 break
             if b is None or b <= 0:
@@ -124,8 +125,9 @@ def scan_candidates():
                 tok0 = json.loads(m["clobTokenIds"])[0]
             except Exception:
                 continue
+            # 只存市场元数据；bestBid 精筛交给 CLOB /prices（Gamma 的 bestBid 不信任）
             out[str(tok0)] = {"cond": m.get("conditionId"), "slug": m.get("slug"),
-                              "end_date": m.get("endDate"), "bid": str(b)}
+                              "end_date": m.get("endDate")}
         cursor = d.get("next_cursor")
         if done or not cursor:
             break
@@ -146,7 +148,7 @@ def load_buy_state():
     return rows
 
 
-def save_buy_state(candidates, open_orders, old_state):
+def save_buy_state(candidates, open_orders, old_state, bids):
     os.makedirs("data", exist_ok=True)
     all_tokens = set(candidates.keys()) | {t for t, o in open_orders.items() if o["side"] == "BUY"}
     with open(BUY_STATE, "w", encoding="utf-8", newline="") as f:
@@ -161,7 +163,7 @@ def save_buy_state(candidates, open_orders, old_state):
                 "condition_id": c.get("cond", old.get("condition_id", "")),
                 "slug": c.get("slug", old.get("slug", "")),
                 "end_date": c.get("end_date", old.get("end_date", "")),
-                "bid": c.get("bid", old.get("bid", "")),
+                "bid": bids.get(token_id, old.get("bid", "")),
                 "order_id": o["order_id"] if o and o["side"] == "BUY" else "",
                 "order_price": o["price"] if o and o["side"] == "BUY" else "",
             })
@@ -412,7 +414,7 @@ def one_round(client, live, max_orders=None):
     do_place(client, all_place, token_to_cond, live)
 
     if live:
-        save_buy_state(candidates, open_orders, buy_state)
+        save_buy_state(candidates, open_orders, buy_state, bids)
     log.info("本轮完成 %.1fs", time.time() - t0)
 
 
