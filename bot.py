@@ -52,7 +52,7 @@ SCAN_CEIL = 0.1          # Gamma 粗筛停止阈值（不信任 Gamma bestBid，
 DAYS_AHEAD = 20          # 结算 > 20 天
 EXEC_INTERVAL = 0.05     # 两次写操作最小间隔（秒）→ 20 单/秒
 PLACE_WORKERS = 8        # 下单线程池大小（写操作被全局限流串行化）
-CANCEL_BATCH = 1000      # 批量撤单每批上限
+CANCEL_BATCH = 100       # 批量撤单每批上限（≤ burst 120，超了整批被限流拒）
 PRICES_CHUNK = 150       # POST /prices 每批 token 数
 MAX_WORKERS = 6          # 取价并发线程
 PREFETCH_WORKERS = 50    # 预取市场信息并发线程
@@ -150,33 +150,35 @@ def load_buy_state():
 
 def save_buy_state(candidates, open_orders, old_state, bids):
     os.makedirs("data", exist_ok=True)
-    all_tokens = set(candidates.keys()) | {t for t, o in open_orders.items() if o["side"] == "BUY"}
+    all_tokens = set(candidates.keys()) | set(open_orders.keys())
     with open(BUY_STATE, "w", encoding="utf-8", newline="") as f:
         w = csv.DictWriter(f, fieldnames=CSV_FIELDS)
         w.writeheader()
         for token_id in all_tokens:
             c = candidates.get(token_id, {})
             old = old_state.get(token_id, {})
-            o = open_orders.get(token_id)
+            buy_orders = [o for o in open_orders.get(token_id, []) if o["side"] == "BUY"]
+            o = buy_orders[0] if buy_orders else None
             w.writerow({
                 "token_id": token_id,
                 "condition_id": c.get("cond", old.get("condition_id", "")),
                 "slug": c.get("slug", old.get("slug", "")),
                 "end_date": c.get("end_date", old.get("end_date", "")),
                 "bid": bids.get(token_id, old.get("bid", "")),
-                "order_id": o["order_id"] if o and o["side"] == "BUY" else "",
-                "order_price": o["price"] if o and o["side"] == "BUY" else "",
+                "order_id": o["order_id"] if o else "",
+                "order_price": o["price"] if o else "",
             })
 
 
 # ── 挂单/持仓查询 ────────────────────────────────────────────────────
 def list_open_orders(client):
-    """→ {token_id: {order_id, price, side}}"""
+    """→ {token_id: [{order_id, price, side}, ...]}（一个 token 可能有多个单）"""
     result = {}
     try:
         for o in client.list_open_orders().iter_items():
-            result[str(o.token_id)] = {"order_id": str(o.id), "price": str(o.price),
-                                       "side": str(o.side).upper()}
+            tid = str(o.token_id)
+            result.setdefault(tid, []).append(
+                {"order_id": str(o.id), "price": str(o.price), "side": str(o.side).upper()})
     except Exception as e:
         log.error("list_open_orders 失败: %s", e)
     return result
@@ -289,8 +291,8 @@ def do_cancel(client, order_ids, live):
             log.info("撤单 %d/%d → canceled=%d", i + len(chunk), len(order_ids),
                      len(res.canceled) if res.canceled else 0)
         except Exception as e:
-            log.error("撤单批失败: %s", e)
-        time.sleep(0.5)
+            log.error("撤单批失败: %s", str(e)[:120])
+        time.sleep(1.5)   # 撤单桶 80/s、burst 120，100/批 + 1.5s 间隔留余量
 
 
 def do_place(client, token_cond, token_to_cond, live):
@@ -322,41 +324,35 @@ def do_place(client, token_cond, token_to_cond, live):
 
 
 # ── 买入规划 ────────────────────────────────────────────────────────
-def plan_buy(candidates, open_orders, bids, buy_state):
-    """对比本轮候选 vs 当前挂单。
-    清理用实时 bestBid(/prices) + CSV end_date（不用 Gamma 快照，避免延迟误撤）。
-    返回 (to_cancel=[order_id], to_place={token_id: (price, size, side)})"""
-    now = datetime.datetime.now(datetime.timezone.utc)
+def plan_buy(candidates, open_orders, bids):
+    """对比本轮候选 vs 当前挂单。目标价 = CLOB bestBid（candidates 已筛>20天）。
+    每个 token 只保留一个价格正确的 BUY 单，其余撤掉。返回 (to_cancel, to_place)。"""
     to_cancel, to_place = [], {}
+    all_tokens = set(open_orders.keys()) | set(candidates.keys())
 
-    # 已挂 BUY 单：实时 bestBid 不符合 / 结算<20天 → 撤；价变 → 撤旧挂新
-    for token_id, o in open_orders.items():
-        if o["side"] != "BUY":
-            continue
-        bb = _float(bids.get(token_id))
-        if bb is None or bb <= 0 or bb >= PRICE_CEIL:
-            to_cancel.append(o["order_id"])                # 实时 bestBid 不符合
-            continue
-        st = buy_state.get(token_id)
-        if st and st.get("end_date"):
-            try:
-                ed = datetime.datetime.fromisoformat(st["end_date"].replace("Z", "+00:00"))
-                if (ed - now).days < DAYS_AHEAD:
-                    to_cancel.append(o["order_id"])        # 结算 <20 天
-                    continue
-            except Exception:
-                pass
-        if Decimal(o["price"]) != Decimal(str(bb)):
-            to_cancel.append(o["order_id"])                # 价变 → 撤旧
-            to_place[token_id] = (str(bb), SHARES, "BUY")  # 挂新
+    for token_id in all_tokens:
+        buy_orders = [o for o in open_orders.get(token_id, []) if o["side"] == "BUY"]
+        # 目标价：候选里 CLOB bestBid<0.05
+        target_price = None
+        if token_id in candidates:
+            bb = _float(bids.get(token_id))
+            if bb is not None and 0 < bb < PRICE_CEIL:
+                target_price = str(bb)
 
-    # 候选未挂 → 挂新
-    for token_id in candidates:
-        if token_id in open_orders and open_orders[token_id]["side"] == "BUY":
-            continue
-        bb = _float(bids.get(token_id))
-        if bb is not None and 0 < bb < PRICE_CEIL:
-            to_place[token_id] = (str(bb), SHARES, "BUY")
+        if target_price is None:
+            # 无目标（bestBid>=0.05 或结算<20天）→ 撤所有 BUY 单
+            for o in buy_orders:
+                to_cancel.append(o["order_id"])
+        else:
+            # 有目标：保留一个价格对的，撤其余；没有对的 → 挂新
+            kept = False
+            for o in buy_orders:
+                if not kept and Decimal(o["price"]) == Decimal(target_price):
+                    kept = True
+                else:
+                    to_cancel.append(o["order_id"])
+            if not kept:
+                to_place[token_id] = (target_price, SHARES, "BUY")
     return to_cancel, to_place
 
 
@@ -365,19 +361,29 @@ def plan_sell(positions, open_orders, asks):
     """有持仓 → 挂卖单 @ bestAsk。返回 (to_cancel, to_place)。"""
     to_cancel, to_place = [], {}
     # 已挂 SELL 单：token 无持仓 → 撤单清理
-    for token_id, o in open_orders.items():
-        if o["side"] == "SELL" and token_id not in positions:
-            to_cancel.append(o["order_id"])
+    for token_id, orders in open_orders.items():
+        for o in orders:
+            if o["side"] == "SELL" and token_id not in positions:
+                to_cancel.append(o["order_id"])
     for token_id, p in positions.items():
         ask = asks.get(token_id)
         if ask is None or _float(ask) is None:
             continue
-        o = open_orders.get(token_id)
-        if o and o["side"] == "SELL":
-            if Decimal(o["price"]) == Decimal(str(ask)):
-                continue
-            to_cancel.append(o["order_id"])
-        to_place[token_id] = (str(ask), p["size"], "SELL")
+        sz = _float(p["size"])
+        if sz is None or sz <= 0:
+            continue
+        # 卖出名义金额 < 1 USDC 跳过（低于最小卖单量，会被拒）
+        if sz * _float(ask) < 1.0:
+            continue
+        sell_orders = [o for o in open_orders.get(token_id, []) if o["side"] == "SELL"]
+        kept = False
+        for o in sell_orders:
+            if not kept and Decimal(o["price"]) == Decimal(str(ask)):
+                kept = True
+            else:
+                to_cancel.append(o["order_id"])
+        if not kept:
+            to_place[token_id] = (str(ask), p["size"], "SELL")
     return to_cancel, to_place
 
 
@@ -390,9 +396,9 @@ def one_round(client, live, max_orders=None):
     log.info("扫描候选 %d 个（%.1fs）", len(candidates), time.time() - t0)
     buy_state = load_buy_state()
     open_orders = list_open_orders(client)
-    need_bids = set(candidates.keys()) | {t for t, o in open_orders.items() if o["side"] == "BUY"}
+    need_bids = set(candidates.keys()) | set(open_orders.keys())
     bids = fetch_prices(need_bids, "BUY")
-    buy_cancel, buy_place = plan_buy(candidates, open_orders, bids, buy_state)
+    buy_cancel, buy_place = plan_buy(candidates, open_orders, bids)
     if max_orders is not None:
         buy_place = dict(list(buy_place.items())[:max_orders])
     log.info("买入：待撤 %d，待挂 %d", len(buy_cancel), len(buy_place))
