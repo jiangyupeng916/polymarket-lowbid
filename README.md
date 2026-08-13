@@ -2,7 +2,7 @@
 
 在 Polymarket 上，对**结算时间远、价格极低**的市场（小概率事件）挂被动买单赚取成交机会，成交后自动挂卖单出场。
 
-核心思路：远离结算的市场上，`bestBid < 0.05` 的 token 风险很小（最坏亏掉每份几分钱），被动挂在 `bestBid` 等成交；一旦成交形成持仓，再对标 `bestAsk` 挂被动卖单出场。
+核心思路：远离结算的市场上，`bestBid < 0.03` 的 token 风险很小（最坏亏掉每份几分钱），被动挂在 `bestBid` 等成交；一旦成交形成持仓，再对标 `bestAsk` 挂被动卖单出场。
 
 ---
 
@@ -25,20 +25,27 @@
 ### 买入侧（每轮循环）
 
 1. **粗筛（Gamma）**：扫描 `gamma-api.polymarket.com/markets/keyset`，取 `结算时间 > 20 天` 且 `bestBid < 0.1` 的市场，拿到 token 列表 + `endDate`。这里 Gamma 的 `bestBid` 只做粗筛定位（放宽到 0.1 留余量），**不作为最终价格依据**（Gamma bestBid 实测不准确）。
-2. **精筛（CLOB）**：用 `POST /prices` 批量取这些 token 的实时 `bestBid`，筛出 `< 0.05` 的。
+2. **精筛（CLOB）**：用 `POST /prices` 批量取这些 token 的实时 `bestBid`，筛出 `< 0.03` 的。
 3. **对比挂单**：
    - 候选里有、未挂单 → **挂买单** `10 份 @ bestBid`（post-only，被动，不追价）
    - 候选里有、已挂但 bestBid 变了 → **撤旧挂新**
    - 候选里有、已挂且价格没变 → 保持不动
-   - 已挂但不再符合（bestBid ≥ 0.05 或 结算 < 20 天）→ **撤单清理**
+   - 已挂但不再符合（bestBid ≥ 0.03 或 结算 < 20 天）→ **撤单清理**
    - **已成交形成持仓 → 停止挂买单**（只挂卖单，避免越买越多）
 4. **写回 CSV**：把本轮候选 + 挂单状态存入 `data/buy_state.csv`，供下轮对比。
 
-### 卖出侧（每轮循环）
+> 买入阈值由 `PRICE_CEIL` 控制（`bot.py` 顶部，默认 `0.03`）。
+
+### 卖出侧（`sell_bot.py` 独立运行）
 
 1. 查持仓 `list_positions`（份额 > 0）。
 2. 对**份额 > 5** 的持仓，用 `POST /prices side=SELL` 取实时 `bestAsk`。
 3. 对标 `bestAsk` 挂被动卖单（post-only），全部持仓卖出。已挂卖单价没变则保持，变了则撤旧挂新。
+
+卖出循环可**独立运行**，用比买入更短的间隔（默认 15 分钟）：
+```bash
+python sell_bot.py --live --interval 900    # 每 15 分钟调整一次卖单
+```
 
 > 卖出最小份额限制：**份额 > 5 才能挂卖单**（低于 5 份会被 CLOB 拒绝，价格无限制）。持仓 ≤ 5 份时跳过不卖。
 
@@ -52,7 +59,9 @@
 ## 文件结构
 
 ```
-├── bot.py                  # ★ 主循环（买入 + 卖出 + CSV 状态 + 全局限流）
+├── bot.py                  # ★ 买入主循环（买入 + 清理 + 卖出，1 小时间隔）
+├── sell_bot.py             # ★ 独立卖出循环（定时轮询持仓调整卖价，默认 15 分钟）
+├── cancel_all_orders.py    # 工具：取消账户所有挂单（SDK cancel_all 一次清空）
 ├── data/
 │   └── buy_state.csv       # 运行时生成：买入状态（gitignored）
 ├── .env.bot1               # 凭据（gitignored，绝不提交）
@@ -109,6 +118,26 @@ python bot.py --live --loop --interval 3600
 # 4. 只处理前 N 个挂单（测试用，限制规模）
 python bot.py --live --once --max 20
 ```
+
+### 独立卖出循环（`sell_bot.py`）
+
+```powershell
+# 试跑一轮（不真实操作）
+python sell_bot.py --dry-run --once
+
+# 真实跑一轮（挂卖单）
+python sell_bot.py --live --once
+
+# 循环运行（每 15 分钟一轮，默认）
+python sell_bot.py --live --interval 900
+```
+
+### 取消所有挂单（`cancel_all_orders.py`）
+
+```powershell
+python cancel_all_orders.py
+```
+一次性清空账户所有挂单（SDK `cancel_all()`，一次调用，非分批）。
 
 ### 命令行参数
 
