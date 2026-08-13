@@ -429,6 +429,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--live", action="store_true", help="真实下单/撤单")
     ap.add_argument("--dry-run", action="store_true", help="只计算打印（默认）")
+    ap.add_argument("--loop", action="store_true", help="循环运行（默认不加 --once 就是循环）")
     ap.add_argument("--interval", type=int, default=3600, help="循环间隔秒（默认 3600）")
     ap.add_argument("--once", action="store_true", help="只跑一轮")
     ap.add_argument("--max", type=int, default=None, help="每轮最多挂 N 单（测试用）")
