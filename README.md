@@ -131,7 +131,7 @@ python bot.py --live --once --max 20
 | 参数 | 值 | 说明 |
 |---|---|---|
 | `SHARES` | `10` | 每个 token 挂的买入份数 |
-| `PRICE_CEIL` | `0.05` | 买入阈值：bestBid < 0.05（CLOB 实时价） |
+| `PRICE_CEIL` | `0.03` | 买入阈值：bestBid < 0.03（CLOB 实时价） |
 | `SCAN_CEIL` | `0.1` | Gamma 粗筛停止阈值（放宽留余量） |
 | `DAYS_AHEAD` | `20` | 只选结算 > 20 天的市场 |
 | `EXEC_INTERVAL` | `0.05` | 两次写操作最小间隔秒（= 20 单/秒） |

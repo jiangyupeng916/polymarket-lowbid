@@ -47,7 +47,7 @@ CLOB = "https://clob.polymarket.com"
 BUY_STATE = os.path.join("data", "buy_state.csv")
 
 SHARES = 10              # 每 token 挂 10 份（买入，用户实测可挂）
-PRICE_CEIL = 0.05        # bestBid < 0.05（下单/清理阈值，用 CLOB /prices 实时价）
+PRICE_CEIL = 0.03        # bestBid < 0.03（下单/清理阈值，用 CLOB /prices 实时价）
 SCAN_CEIL = 0.1          # Gamma 粗筛停止阈值（不信任 Gamma bestBid，放宽到 0.1 留余量）
 DAYS_AHEAD = 20          # 结算 > 20 天
 EXEC_INTERVAL = 0.05     # 两次写操作最小间隔（秒）→ 20 单/秒
